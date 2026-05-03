@@ -11,10 +11,56 @@
 #include <random>
 
 constexpr int START = 0x76;
-constexpr int END = 0x77;
+constexpr int PAUSE = 0x77;
+constexpr int END = 0x78;
 
 constexpr double SINE_AMPLITUDE = 0.25;
-constexpr double JUMP_PROBABILITY = 0.08;
+constexpr double JUMP_PROBABILITY = 0.03;
+constexpr double TYPO_PROBABILITY = 0.03;
+
+namespace KeyboardLayout {
+	inline const std::vector<std::string> QWERTY = {
+		"1234567890-=",
+		"qwertyuiop",
+		"asdfghjkl",
+		"zxcvbnm"
+	};
+}
+
+enum class ProgramState {
+	Stopped = 0x0,
+	Paused = 0x1,
+	Active = 0x2
+};
+
+std::vector<char> getAdjacentKeys(char ch, const std::vector<std::string>& keyboardLayout) {
+	std::vector<char> adjacent;
+
+	ch = tolower(ch);
+	for (size_t r = 0; r < keyboardLayout.size(); ++r) {
+		const std::string& row = keyboardLayout[r];
+		const size_t c = row.find(ch);
+
+		if (c != std::string::npos) {
+			for (int dR = -1; dR <= 1; ++dR) {
+				for (int dC = -1; dC <= 1; ++dC) {
+					if (dR == 0 && dC == 0) continue;
+
+					int newRow = r + dR;
+					int newCol = c + dC;
+
+					if (newRow >= 0 && newRow < keyboardLayout.size()
+						&& newCol >= 0 && newCol < keyboardLayout[newRow].size()) {
+						adjacent.push_back(keyboardLayout[newRow][newCol]);
+					}
+
+				}
+			}
+		}
+	}
+	return adjacent;
+
+}
 
 class ScopeExit {
 public:
@@ -54,7 +100,7 @@ private:
 
 struct StateInfo {
 	std::atomic<bool> running{ true };
-	std::atomic<bool> active{ false };
+	std::atomic<int> active{ (int)ProgramState::Stopped };
 
 	std::string clipboardText;
 
@@ -111,21 +157,29 @@ std::wstring GetClipboardText() {
 
 void KeyboardInput(char ch) {
 	SHORT result = VkKeyScanA(ch);
+
+	if (result == -1)
+		return;
+
 	BYTE vk = LOBYTE(result);
 	BYTE shift = HIBYTE(result);
+
+	
+	
+
+	if (shift & 1) {
+		INPUT ip = { 0 };
+		ip.type = INPUT_KEYBOARD;
+		ip.ki.wVk = VK_SHIFT;
+		
+		SendInput(1, &ip, sizeof(INPUT));
+	}
 
 	INPUT ip = { 0 };
 	ip.type = INPUT_KEYBOARD;
 
-	if (shift) {
-		ip.ki.wVk = VK_SHIFT;
-		ip.ki.dwFlags = 0;
-		SendInput(1, &ip, sizeof(INPUT));
-	}
-
 	ip.ki.wScan = 0;
 	ip.ki.time = 0;
-	ip.ki.dwExtraInfo;
 
 	ip.ki.wVk = vk;
 	ip.ki.dwFlags = 0;
@@ -134,27 +188,48 @@ void KeyboardInput(char ch) {
 	ip.ki.dwFlags = KEYEVENTF_KEYUP;
 	SendInput(1, &ip, sizeof(INPUT));
 
-	ip.ki.wVk = VK_SHIFT;
+	if (shift & 1) {
+		INPUT ip = { 0 };
+		ip.type = INPUT_KEYBOARD;
+		ip.ki.wVk = VK_SHIFT;
+		ip.ki.dwFlags = KEYEVENTF_KEYUP;
+		SendInput(1, &ip, sizeof(INPUT));
+	}
+}
+
+void KeyboardInput(WORD vk) {
+	INPUT ip = { 0 };
+	ip.type = INPUT_KEYBOARD;
+
+	ip.ki.wVk = vk;
+	ip.ki.dwFlags = 0;
+	SendInput(1, &ip, sizeof(INPUT));
+
 	ip.ki.dwFlags = KEYEVENTF_KEYUP;
 	SendInput(1, &ip, sizeof(INPUT));
 }
 
 
 
-void checkInputs(std::atomic<bool>& active, HWND hwnd) {
+void checkInputs(std::atomic<int>& active, HWND hwnd) {
 	StateInfo* state = GetAppState(hwnd);
 	if (!state) { return; }
 
 	while (state->running) {
 		if (GetAsyncKeyState(START) & 1) {
-			active = true;
+			active = (int)ProgramState::Active;
 
-			SetWindowText(hwnd, L"Human Typer (F8 to stop)");
+			SetWindowText(hwnd, L"Human Typer (F8 to pause, F9 to stop)");
 		}
 		else if (GetAsyncKeyState(END) & 1) {
-			active = false;
+			active = (int)ProgramState::Stopped;
 
 			SetWindowText(hwnd, L"Human Typer (F7 to start)");
+		}
+		else if (GetAsyncKeyState(PAUSE) & 1) {
+			active = (int)ProgramState::Paused;
+
+			SetWindowText(hwnd, L"Human Typer (F7 to unpause)");
 		}
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(3));
@@ -242,6 +317,7 @@ public:
 	HWND hEdit = nullptr;
 	HWND jumpCheck = nullptr;
 	HWND randomOffsetCheck = nullptr;
+	HWND typosCheck = nullptr;
 };
 
 inline StateInfo* GetAppState(HWND hwnd) {
@@ -314,6 +390,18 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 			NULL
 		);
 
+		typosCheck = CreateWindowEx(
+			0,
+			L"BUTTON",
+			L"Typos (fixes them)",
+			WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
+			10, 120, 200, 25,
+			m_hwnd,
+			(HMENU)2,
+			GetModuleHandle(NULL),
+			NULL
+		);
+
 		SendMessage(randomOffsetCheck, BM_SETCHECK, BST_CHECKED, 0);
 
 		return 0;
@@ -369,6 +457,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+	
 	/*
 	AllocConsole();
 
@@ -378,7 +467,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	freopen_s(&f, "CONIN$", "r", stdin);
 
 	std::cout << "Console is active..." << std::endl;
+
+	std::vector<char> adj = getAdjacentKeys('a', KeyboardLayout::QWERTY);
+	std::cout << std::string(adj.begin(), adj.end()) << std::endl;
+	
 	*/
+	
 
 	MainWindow win;
 
@@ -413,7 +507,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		std::random_device rd;
 		std::mt19937 gen(rd());
 		std::uniform_real_distribution<double> probDist(0.0, 1.0);
-		std::uniform_int_distribution<int> delayDist(1, 4);
+		std::uniform_int_distribution<int> delayDist(250, 2500);
 
 		while (state->running) {
 			wchar_t buffer[512];
@@ -427,27 +521,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 			}
 
 
-			if (!state->active.load()) {
+			if (state->active.load() != (int)ProgramState::Active) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				continue;
 			}
 
-			for (char ch : wstring_to_utf8(GetClipboardText())) {
-				if (!state->active.load() || !state->running.load())
-					break;
-
-				if (SendMessage(win.jumpCheck, BM_GETCHECK, 0, 0)) {
-
-
-
-					double probability = probDist(gen);
-
-					if (probability < JUMP_PROBABILITY) {
-						std::this_thread::sleep_for(std::chrono::seconds(delayDist(gen)));
-					}
+			const std::string& clipboardText = wstring_to_utf8(GetClipboardText());
+			for (int c = 0; c < clipboardText.size(); c++) {
+				while (state->active.load() == (int)ProgramState::Paused) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				}
-
-				KeyboardInput(ch);
 
 				double offset = 1.0;
 
@@ -458,14 +541,64 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					offset = 1.0 + SINE_AMPLITUDE * std::sin(t * 5.0);
 				}
 
-				std::this_thread::sleep_for(
-					std::chrono::milliseconds(
-						static_cast<int>(((1000 / (state->wpm / 12.0))) * offset)
-					)
-				);
+				int miliOffset = static_cast<int>(((1000 / (state->wpm / 12.0))) * offset);
+
+				char ch = clipboardText[c];
+
+				if (state->active.load() == (int)ProgramState::Stopped || !state->running.load())
+					break;
+
+				if (SendMessage(win.jumpCheck, BM_GETCHECK, 0, 0)) {
+
+
+
+					double probability = probDist(gen);
+
+					if (probability < JUMP_PROBABILITY) {
+						std::this_thread::sleep_for(std::chrono::milliseconds(delayDist(gen)));
+					}
+
+				}
+
+				if (SendMessage(win.typosCheck, BM_GETCHECK, 0, 0)) {
+					double probability = probDist(gen);
+
+					if (probability < TYPO_PROBABILITY) {
+						std::vector<char> adj = getAdjacentKeys(ch, KeyboardLayout::QWERTY);
+
+						if (adj.empty()) {
+							KeyboardInput(ch);
+							continue;
+						}
+
+						std::uniform_int_distribution<size_t> randomTypoDist(0, adj.size() - 1);
+						
+
+						std::uniform_int_distribution<size_t> typoAmountDist(1, 3);
+						size_t typos = typoAmountDist(gen);
+
+						for (int _ = 0; _ < typos; ++_) {
+							KeyboardInput(adj[randomTypoDist(gen)]);
+
+							std::this_thread::sleep_for(std::chrono::milliseconds(miliOffset));
+							
+						}
+
+						std::this_thread::sleep_for(std::chrono::milliseconds(delayDist(gen)));
+
+						for (int _ = 0; _ < typos; ++_) {
+							KeyboardInput((WORD)VK_BACK);
+							std::this_thread::sleep_for(std::chrono::milliseconds(miliOffset));
+						}
+
+					}
+				}
+				KeyboardInput(ch);
+
+				std::this_thread::sleep_for(std::chrono::milliseconds(miliOffset));
 			}
 
-			state->active.store(false);
+			state->active.store((int)ProgramState::Stopped);
 		}
 		});
 
