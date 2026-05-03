@@ -463,7 +463,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				);
 			}
 
-			state->active = false;
+			state->active.store(false);
 		}
 	});
 
@@ -478,7 +478,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	}
 
 	
-	state->running = false;
+	state->running.store(false);
 	worker.join();
 	inputThread.join();
 
