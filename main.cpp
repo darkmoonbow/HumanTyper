@@ -13,12 +13,14 @@
 constexpr int START = 0x76;
 constexpr int END = 0x77;
 
+constexpr double SINE_AMPLITUDE = 0.25;
 constexpr double JUMP_PROBABILITY = 0.08;
 
 class ScopeExit {
 public:
 	explicit ScopeExit(std::function<void()> f)
-		: func(std::move(f)), active(true) {}
+		: func(std::move(f)), active(true) {
+	}
 
 	~ScopeExit() {
 		if (active) func();
@@ -60,7 +62,7 @@ struct StateInfo {
 
 	RAIIBrush brush{ RGB(235, 235, 235) };
 
-	
+
 };
 class MainWindow;
 inline StateInfo* GetAppState(HWND hwnd);
@@ -97,7 +99,7 @@ std::wstring GetClipboardText() {
 	HANDLE hData = GetClipboardData(CF_UNICODETEXT);
 	if (!hData)
 		throw std::runtime_error("GetClipboardData failed.");
-	
+
 	wchar_t* text = static_cast<wchar_t*>(GlobalLock(hData));
 	if (!text)
 		throw std::runtime_error("GlobalLock failed");
@@ -140,7 +142,7 @@ void KeyboardInput(char ch) {
 
 
 void checkInputs(std::atomic<bool>& active, HWND hwnd) {
-	StateInfo *state = GetAppState(hwnd);
+	StateInfo* state = GetAppState(hwnd);
 	if (!state) { return; }
 
 	while (state->running) {
@@ -191,7 +193,7 @@ public:
 		return DefWindowProc(hwnd, uMsg, wParam, lParam);
 	}
 
-	BaseWindow() : m_hwnd(NULL) { }
+	BaseWindow() : m_hwnd(NULL) {}
 
 	BOOL Create(
 		PCWSTR lpWindowName,
@@ -222,7 +224,7 @@ public:
 	}
 
 	HWND Window() const { return m_hwnd; }
-	
+
 protected:
 	virtual PCWSTR ClassName() const = 0;
 	virtual LRESULT HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) = 0;
@@ -379,7 +381,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	*/
 
 	MainWindow win;
-	
+
 
 	if (!win.Create(
 		L"Human Typer (F7 to start)",
@@ -392,7 +394,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	)) {
 		return 0;
 	}
-	
+
 	HWND hwnd = win.Window();
 
 	ShowWindow(hwnd, nCmdShow);
@@ -405,7 +407,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		MessageBox(hwnd, L"Failed to get application state data.", L"Error", MB_OK | MB_ICONERROR);
 		return 0;
 	}
-	
+
 	std::thread worker([&]() {
 
 		std::random_device rd;
@@ -453,7 +455,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 					auto now = std::chrono::steady_clock::now().time_since_epoch();
 					double t = std::chrono::duration<double>(now).count();
 
-					offset = 1.0 + 0.1 * std::sin(t * 5.0);
+					offset = 1.0 + SINE_AMPLITUDE * std::sin(t * 5.0);
 				}
 
 				std::this_thread::sleep_for(
@@ -465,10 +467,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 			state->active.store(false);
 		}
-	});
+		});
 
 	std::thread inputThread(checkInputs, std::ref(state->active), hwnd);
-	
+
 
 	MSG msg;
 	while (GetMessage(&msg, nullptr, 0, 0))
@@ -477,7 +479,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		DispatchMessage(&msg);
 	}
 
-	
+
 	state->running.store(false);
 	worker.join();
 	inputThread.join();
