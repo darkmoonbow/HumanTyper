@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <commdlg.h>
 #include <string>
 #include <stdexcept>
 #include <memory>
@@ -9,6 +10,22 @@
 #include <thread>
 #include <codecvt>
 #include <random>
+#include <fstream>
+#include <sstream>
+#include <commctrl.h>
+
+#define ID_FILE_OPEN   0x1
+#define ID_FILE_EXIT   0x2
+
+#define ID_CHECK_JUMP  0x64
+#define ID_CHECK_SINE  0x65
+#define ID_CHECK_TYPOS 0x66
+
+#define ID_WPM_EDIT 0x67
+#define ID_CLIPBOARD_EDIT 0x68
+
+#define ID_LOAD_CLIPBOARD_BUTTON 0x69
+#define ID_CHAR_POSITION 0x70
 
 constexpr int START = 0x76;
 constexpr int PAUSE = 0x77;
@@ -32,6 +49,36 @@ enum class ProgramState {
 	Paused = 0x1,
 	Active = 0x2
 };
+
+bool OpenFileDialog(HWND hwnd, wchar_t* outFile, DWORD size) {
+	OPENFILENAME ofn = {0 };
+	wchar_t fileName[MAX_PATH] = L"";
+
+	ZeroMemory(&ofn, sizeof(ofn));
+
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = hwnd;
+	ofn.lpstrFile = outFile;
+	ofn.nMaxFile = size;
+
+	ofn.lpstrFilter = L"All Files\0*.*\0Text Files\0*.txt\0\0";
+	ofn.nFilterIndex = 1;
+
+	ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_EXPLORER;
+
+	BOOL ok = GetOpenFileName(&ofn);
+
+	if (!ok) {
+		DWORD err = CommDlgExtendedError();
+
+		std::wstring msg = L"Open dialog failed. Error code: " + std::to_wstring(err);
+
+		MessageBox(hwnd, msg.c_str(), L"Error", MB_OK);
+	}
+
+	return ok;
+
+}
 
 std::vector<char> getAdjacentKeys(char ch, const std::vector<std::string>& keyboardLayout) {
 	std::vector<char> adjacent;
@@ -106,7 +153,7 @@ struct StateInfo {
 
 	int wpm = 60;
 
-	RAIIBrush brush{ RGB(235, 235, 235) };
+	RAIIBrush brush{ RGB(240, 240, 240) };
 
 
 };
@@ -136,6 +183,43 @@ std::string wstring_to_utf8(const std::wstring& wstr) {
 	return result;
 }
 
+std::wstring utf8_to_wstring(const std::string& str) {
+	if (str.empty()) 
+		return L"";
+
+	int sizeNeeded = MultiByteToWideChar(
+		CP_UTF8, 
+		0, 
+		str.c_str(), 
+		-1, 
+		nullptr, 
+		0
+	);
+
+	if (sizeNeeded <= 0)
+		return L"";
+
+	std::wstring wtext(sizeNeeded, L'\0');
+
+	MultiByteToWideChar(
+		CP_UTF8, 
+		0, 
+		str.c_str(),
+		-1, 
+		&wtext[0], 
+		sizeNeeded
+	);
+
+	if (!wtext.empty() && wtext.back() == L'\0')
+		wtext.pop_back();
+
+	return wtext;
+}
+
+
+
+
+
 std::wstring GetClipboardText() {
 	if (!OpenClipboard(nullptr))
 		throw std::runtime_error("OpenClipboard failed.");
@@ -150,9 +234,11 @@ std::wstring GetClipboardText() {
 	if (!text)
 		throw std::runtime_error("GlobalLock failed");
 
+	std::wstring result(text);
+
 	ScopeExit unlock([&] { GlobalUnlock(hData); });
 
-	return std::wstring(text);
+	return std::wstring(result);
 }
 
 void KeyboardInput(char ch) {
@@ -295,6 +381,11 @@ public:
 			nWidth, nHeight, hWndParent, hMenu, GetModuleHandle(NULL), this
 		);
 
+		INITCOMMONCONTROLSEX icc = {};
+		icc.dwSize = sizeof(icc);
+		icc.dwICC = ICC_PROGRESS_CLASS;
+		InitCommonControlsEx(&icc);
+
 		return (m_hwnd ? TRUE : FALSE);
 	}
 
@@ -315,9 +406,13 @@ public:
 	StateInfo state;
 
 	HWND hEdit = nullptr;
-	HWND jumpCheck = nullptr;
-	HWND randomOffsetCheck = nullptr;
-	HWND typosCheck = nullptr;
+	HWND hClipboardEdit = nullptr;
+	HWND hJumpCheck = nullptr;
+	HWND hRandomOffsetCheck = nullptr;
+	HWND hTyposCheck = nullptr;
+	HWND hLoadClipboardButton = nullptr;
+	HWND hProgressBar = nullptr;
+	HWND hCharPosition = nullptr;
 };
 
 inline StateInfo* GetAppState(HWND hwnd) {
@@ -325,9 +420,41 @@ inline StateInfo* GetAppState(HWND hwnd) {
 	return pMain ? &pMain->state : nullptr;
 }
 
+class File {
+public:
+	explicit File(const std::string& path) :
+		f(path, std::ios::binary) {
+
+		if (!f.is_open()) {
+			throw std::runtime_error(std::format("Failed to open file \"{}\"", path));
+		}
+	}
+	~File() {
+		f.close();
+	}
+
+	void Contents(std::string& buffer) {
+		std::ostringstream ss;
+		ss << f.rdbuf();
+		buffer = ss.str();
+	}
+private:
+	std::ifstream f;
+};
+
 LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 	switch (uMsg) {
 	case WM_CREATE: {
+		HMENU hMenu = CreateMenu();
+
+		HMENU hFileMenu = CreatePopupMenu();
+		AppendMenu(hFileMenu, MF_STRING, ID_FILE_OPEN, L"Open");
+
+		AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, L"File");
+
+		SetMenu(m_hwnd, hMenu);
+		DrawMenuBar(m_hwnd);
+
 		HWND hLabel = CreateWindowEx(
 			0,
 			L"STATIC",
@@ -366,49 +493,146 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 			NULL
 		);
 
-		jumpCheck = CreateWindowEx(
+		hJumpCheck = CreateWindowEx(
 			0,
 			L"BUTTON",
 			L"Jump",
 			WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
 			10, 70, 200, 25,
 			m_hwnd,
-			(HMENU)2,
+			(HMENU)ID_CHECK_JUMP,
 			GetModuleHandle(NULL),
 			NULL
 		);
 
-		randomOffsetCheck = CreateWindowEx(
+		hRandomOffsetCheck = CreateWindowEx(
 			0,
 			L"BUTTON",
 			L"Sine Oscillation",
 			WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
 			10, 95, 200, 25,
 			m_hwnd,
-			(HMENU)2,
+			(HMENU)ID_CHECK_SINE,
 			GetModuleHandle(NULL),
 			NULL
 		);
 
-		typosCheck = CreateWindowEx(
+		hTyposCheck = CreateWindowEx(
 			0,
 			L"BUTTON",
 			L"Typos (fixes them)",
 			WS_CHILD | WS_VISIBLE | BS_CHECKBOX,
 			10, 120, 200, 25,
 			m_hwnd,
-			(HMENU)2,
+			(HMENU)ID_CHECK_TYPOS,
 			GetModuleHandle(NULL),
 			NULL
 		);
 
-		SendMessage(randomOffsetCheck, BM_SETCHECK, BST_CHECKED, 0);
+		hClipboardEdit = CreateWindowEx(
+			WS_EX_CLIENTEDGE,
+			L"EDIT",
+			L"Lorem ipsum dolor sit amet...",
+			WS_CHILD | WS_VISIBLE | WS_BORDER |
+			ES_LEFT | ES_AUTOHSCROLL | ES_MULTILINE,
+			300, 60, 300, 200,
+			m_hwnd,
+			(HMENU)1,
+			GetModuleHandle(NULL),
+			NULL
+
+		);
+
+		hLoadClipboardButton = CreateWindowEx(
+			0,
+			L"BUTTON",
+			L"Load clipboard data",
+			WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
+			300, 270, 200, 30,
+			m_hwnd,
+			(HMENU)ID_LOAD_CLIPBOARD_BUTTON,
+			GetModuleHandle(NULL),
+			NULL
+		);
+
+		hCharPosition = CreateWindowEx(
+			0,
+			L"STATIC",
+			L"Char position:",
+			WS_CHILD | WS_VISIBLE | ES_READONLY | ES_LEFT,
+			300, 10, 200, 20,
+			m_hwnd,
+			NULL,
+			GetModuleHandle(NULL),
+			NULL
+		);
+
+		hProgressBar = CreateWindowEx(
+			0,
+			PROGRESS_CLASS,
+			NULL,
+			WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+			300, 30, 300, 20,
+			m_hwnd,
+			NULL,
+			GetModuleHandle(NULL),
+			NULL
+		);
+
+		SendMessage(hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+
+		//SendMessage(loadClipboardButton, WM_SETFONT, (WPARAM)hFont, TRUE);
+		
+		
+		std::wstring clipboardText = GetClipboardText();
+		SendMessage(hClipboardEdit, WM_SETTEXT, wParam, (LPARAM)clipboardText.c_str());
+
+		SendMessage(hRandomOffsetCheck, BM_SETCHECK, BST_CHECKED, 0);
 
 		return 0;
 	}
 
 	case WM_COMMAND: {
-		if (LOWORD(wParam) == 2) {
+		int id = LOWORD(wParam);
+		HWND hCtrl = (HWND)lParam;
+
+		//menu options
+		if (hCtrl == nullptr) {
+			switch (id) {
+			case ID_FILE_OPEN: { // open
+				wchar_t buffer[512] = { 0 };
+
+
+				if (!OpenFileDialog(m_hwnd, buffer, 512) || buffer[0] == L'\0') {
+
+					return 1;
+				}
+
+
+				std::wstring msg = std::wstring(L"Would you like to use \"") + buffer + std::wstring(L"\"?");
+				int dialogResult = MessageBoxW(m_hwnd, msg.c_str(), L"Open File", MB_OKCANCEL);
+
+				if (dialogResult == IDOK) {
+					std::string path = wstring_to_utf8(buffer);
+
+					File f(path);
+					std::string fileText;
+					f.Contents(fileText);
+
+					SendMessage(hClipboardEdit, WM_SETTEXT, 0, (LPARAM)(utf8_to_wstring(fileText)).c_str());
+					
+
+				}
+
+				break;
+			}
+			}
+		}
+
+		// checkboxes
+		if (id == ID_CHECK_JUMP ||
+			id == ID_CHECK_SINE ||
+			id == ID_CHECK_TYPOS) {
 			HWND hCheck = (HWND)lParam;
 
 			LRESULT state = SendMessage(hCheck, BM_GETCHECK, 0, 0);
@@ -417,6 +641,11 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 				state == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED,
 				0
 			);
+		}
+
+		if (id == ID_LOAD_CLIPBOARD_BUTTON) {
+			std::wstring clipboardText = GetClipboardText();
+			SendMessage(hClipboardEdit, WM_SETTEXT, 0, (LPARAM)clipboardText.c_str());
 		}
 
 		return 0;
@@ -476,15 +705,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	MainWindow win;
 
-
 	if (!win.Create(
 		L"Human Typer (F7 to start)",
 		WS_OVERLAPPEDWINDOW,
 		0,
 		CW_USEDEFAULT,
 		CW_USEDEFAULT,
-		500,
+		800,
 		400
+
 	)) {
 		return 0;
 	}
@@ -510,31 +739,39 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		std::uniform_int_distribution<int> delayDist(250, 2500);
 
 		while (state->running) {
-			wchar_t buffer[512];
-			GetWindowText(win.hEdit, buffer, 512);
-
-			try {
-				state->wpm = std::stoi(buffer);
-			}
-			catch (...) {
-
-			}
-
+			wchar_t buffer[2048];
+			SendMessageW(win.hEdit, WM_GETTEXT, (WPARAM)2048, (LPARAM)buffer);
 
 			if (state->active.load() != (int)ProgramState::Active) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				continue;
 			}
 
-			const std::string& clipboardText = wstring_to_utf8(GetClipboardText());
-			for (int c = 0; c < clipboardText.size(); c++) {
+			SendMessageW(win.hClipboardEdit, WM_GETTEXT, (WPARAM)2048, (LPARAM)buffer);
+
+			const std::string& typeText = wstring_to_utf8(buffer);
+			for (int c = 0; c < typeText.size(); ++c) {
 				while (state->active.load() == (int)ProgramState::Paused) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				}
 
+				try {
+					state->wpm = std::stoi(buffer);
+				}
+				catch (...) {
+
+				}
+
+				std::wstring charPositionText = L"Char position: " + std::to_wstring(c);
+				SendMessage(win.hCharPosition, WM_SETTEXT, 0, (LPARAM)charPositionText.c_str());
+				
+				int percent = (int)((c * 100) / typeText.size());
+				SendMessage(win.hProgressBar, PBM_SETPOS, percent, 0);
+				
+
 				double offset = 1.0;
 
-				if (SendMessage(win.randomOffsetCheck, BM_GETCHECK, 0, 0)) {
+				if (SendMessage(win.hRandomOffsetCheck, BM_GETCHECK, 0, 0)) {
 					auto now = std::chrono::steady_clock::now().time_since_epoch();
 					double t = std::chrono::duration<double>(now).count();
 
@@ -543,12 +780,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 				int miliOffset = static_cast<int>(((1000 / (state->wpm / 12.0))) * offset);
 
-				char ch = clipboardText[c];
+				char ch = typeText[c];
 
 				if (state->active.load() == (int)ProgramState::Stopped || !state->running.load())
 					break;
 
-				if (SendMessage(win.jumpCheck, BM_GETCHECK, 0, 0)) {
+				if (SendMessage(win.hJumpCheck, BM_GETCHECK, 0, 0)) {
 
 
 
@@ -560,7 +797,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 				}
 
-				if (SendMessage(win.typosCheck, BM_GETCHECK, 0, 0)) {
+				if (SendMessage(win.hTyposCheck, BM_GETCHECK, 0, 0)) {
 					double probability = probDist(gen);
 
 					if (probability < TYPO_PROBABILITY) {
@@ -598,12 +835,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				std::this_thread::sleep_for(std::chrono::milliseconds(miliOffset));
 			}
 
+			SendMessage(win.hCharPosition, WM_SETTEXT, 0, (LPARAM)L"Char position: 0");
+			SendMessage(win.hProgressBar, PBM_SETPOS, 0, 0);
 			state->active.store((int)ProgramState::Stopped);
 		}
 		});
 
 	std::thread inputThread(checkInputs, std::ref(state->active), hwnd);
-
 
 	MSG msg;
 	while (GetMessage(&msg, nullptr, 0, 0))
