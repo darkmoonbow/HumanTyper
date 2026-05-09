@@ -12,6 +12,7 @@
 #include <random>
 #include <fstream>
 #include <sstream>
+#include <mutex>
 #include <commctrl.h>
 
 #define ID_FILE_OPEN   0x1
@@ -34,6 +35,9 @@ constexpr int END = 0x78;
 constexpr double SINE_AMPLITUDE = 0.25;
 constexpr double JUMP_PROBABILITY = 0.03;
 constexpr double TYPO_PROBABILITY = 0.03;
+
+std::mutex clipboardTextMutex;
+std::string clipboardTextboxText;
 
 namespace KeyboardLayout {
 	inline const std::vector<std::string> QWERTY = {
@@ -443,6 +447,8 @@ private:
 };
 
 LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
+
+
 	switch (uMsg) {
 	case WM_CREATE: {
 		HMENU hMenu = CreateMenu();
@@ -537,7 +543,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 			ES_LEFT | ES_AUTOHSCROLL | ES_MULTILINE,
 			300, 60, 300, 200,
 			m_hwnd,
-			(HMENU)1,
+			(HMENU)ID_CLIPBOARD_EDIT,
 			GetModuleHandle(NULL),
 			NULL
 
@@ -587,6 +593,12 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 		std::wstring clipboardText = GetClipboardText();
 		SendMessage(hClipboardEdit, WM_SETTEXT, wParam, (LPARAM)clipboardText.c_str());
 
+		wchar_t buffer[4096];
+		SendMessageW(hClipboardEdit, WM_GETTEXT, 4096, (LPARAM)buffer);
+
+		std::lock_guard<std::mutex> lock(clipboardTextMutex);
+		clipboardTextboxText = wstring_to_utf8(buffer);
+
 		SendMessage(hRandomOffsetCheck, BM_SETCHECK, BST_CHECKED, 0);
 
 		return 0;
@@ -594,7 +606,21 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
 	case WM_COMMAND: {
 		int id = LOWORD(wParam);
+		int code = HIWORD(wParam);
+
 		HWND hCtrl = (HWND)lParam;
+
+
+		if (id == ID_CLIPBOARD_EDIT && code == EN_CHANGE) {
+			wchar_t buffer[4096];
+			SendMessageW(hClipboardEdit, WM_GETTEXT, (WPARAM)4096, (LPARAM)buffer);
+
+			{
+				std::lock_guard<std::mutex> lock(clipboardTextMutex);
+				clipboardTextboxText = wstring_to_utf8(buffer);
+			}
+			
+		}
 
 		//menu options
 		if (hCtrl == nullptr) {
@@ -620,6 +646,10 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 					f.Contents(fileText);
 
 					SendMessage(hClipboardEdit, WM_SETTEXT, 0, (LPARAM)(utf8_to_wstring(fileText)).c_str());
+					SendMessageW(hClipboardEdit, WM_GETTEXT, 4096, (LPARAM)buffer);
+
+					std::lock_guard<std::mutex> lock(clipboardTextMutex);
+					clipboardTextboxText = wstring_to_utf8(buffer);
 					
 
 				}
@@ -646,6 +676,12 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 		if (id == ID_LOAD_CLIPBOARD_BUTTON) {
 			std::wstring clipboardText = GetClipboardText();
 			SendMessage(hClipboardEdit, WM_SETTEXT, 0, (LPARAM)clipboardText.c_str());
+
+			wchar_t buffer[4096];
+			SendMessageW(hClipboardEdit, WM_GETTEXT, 4096, (LPARAM)buffer);
+
+			std::lock_guard<std::mutex> lock(clipboardTextMutex);
+			clipboardTextboxText = wstring_to_utf8(buffer);
 		}
 
 		return 0;
@@ -678,6 +714,7 @@ LRESULT MainWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
 		return 0;
 	}
+	
 	}
 
 	return DefWindowProc(m_hwnd, uMsg, wParam, lParam);
@@ -740,18 +777,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 		while (state->running) {
 			wchar_t wpmBuffer[512];
-			wchar_t clipboardBuffer[4096];
-			SendMessageW(win.hEdit, WM_GETTEXT, (WPARAM)2048, (LPARAM)wpmBuffer);
 
 			if (state->active.load() != (int)ProgramState::Active) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				continue;
 			}
 
-			SendMessageW(win.hClipboardEdit, WM_GETTEXT, (WPARAM)2048, (LPARAM)clipboardBuffer);
+			std::string clipboardTextboxTextCopy;
 
-			const std::string& typeText = wstring_to_utf8(wpmBuffer);
-			for (int c = 0; c < typeText.size(); ++c) {
+			{
+				std::lock_guard<std::mutex> lock(clipboardTextMutex);
+				clipboardTextboxTextCopy = clipboardTextboxText;
+			}
+
+
+			for (int c = 0; c < clipboardTextboxTextCopy.size(); ++c) {
+				
+				if (clipboardTextboxTextCopy != clipboardTextboxText)
+					break;
+
+				SendMessageW(win.hEdit, WM_GETTEXT, (WPARAM)2048, (LPARAM)wpmBuffer);
 				while (state->active.load() == (int)ProgramState::Paused) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				}
@@ -766,7 +811,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 				std::wstring charPositionText = L"Char position: " + std::to_wstring(c);
 				SendMessage(win.hCharPosition, WM_SETTEXT, 0, (LPARAM)charPositionText.c_str());
 				
-				int percent = (int)((c * 100) / typeText.size());
+				int percent = (int)((c * 100) / clipboardTextboxTextCopy.size());
 				SendMessage(win.hProgressBar, PBM_SETPOS, percent, 0);
 				
 
@@ -781,7 +826,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 				int miliOffset = static_cast<int>(((1000 / (state->wpm / 12.0))) * offset);
 
-				char ch = typeText[c];
+				char ch = clipboardTextboxTextCopy[c];
 
 				if (state->active.load() == (int)ProgramState::Stopped || !state->running.load())
 					break;
