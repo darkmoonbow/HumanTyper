@@ -739,24 +739,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		std::uniform_int_distribution<int> delayDist(250, 2500);
 
 		while (state->running) {
-			wchar_t buffer[2048];
-			SendMessageW(win.hEdit, WM_GETTEXT, (WPARAM)2048, (LPARAM)buffer);
+			wchar_t wpmBuffer[512];
+			wchar_t clipboardBuffer[4096];
+			SendMessageW(win.hEdit, WM_GETTEXT, (WPARAM)2048, (LPARAM)wpmBuffer);
 
 			if (state->active.load() != (int)ProgramState::Active) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				continue;
 			}
 
-			SendMessageW(win.hClipboardEdit, WM_GETTEXT, (WPARAM)2048, (LPARAM)buffer);
+			SendMessageW(win.hClipboardEdit, WM_GETTEXT, (WPARAM)2048, (LPARAM)clipboardBuffer);
 
-			const std::string& typeText = wstring_to_utf8(buffer);
+			const std::string& typeText = wstring_to_utf8(wpmBuffer);
 			for (int c = 0; c < typeText.size(); ++c) {
 				while (state->active.load() == (int)ProgramState::Paused) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				}
 
 				try {
-					state->wpm = std::stoi(buffer);
+					state->wpm = std::stoi(wpmBuffer);
 				}
 				catch (...) {
 
